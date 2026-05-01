@@ -1,0 +1,17 @@
+# Synapse
+# MEMORY_MAP.md is auto-generated but COMMITTED (used by Agent on first load)
+# Node files in meta/ are tracked (they ARE the memory)
+
+# User-specific settings (contains personal permissions)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Benchmark artifacts
+.benchmark/
