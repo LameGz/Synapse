@@ -207,5 +207,5 @@ Apache 2.0 © 2026
 
 ## Related Projects
 
-- [RecallLoom]((https://github.com/Frappucc1no/recall-loom)) — Flat-file memory for small projects (the precursor to Synapse)
+- [RecallLoom](https://github.com/Frappucc1no/recall-loom)— Flat-file memory for small projects (the precursor to Synapse)
   - [Microsoft GraphRAG](https://github.com/microsoft/graphrag) — Enterprise-scale graph retrieval (the academic foundation)
