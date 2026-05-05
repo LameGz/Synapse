@@ -1,0 +1,21 @@
+Synapse
+Copyright 2026 The Synapse Authors
+
+This product includes software developed at
+the Synapse project (https://github.com/user/Synapse).
+
+---
+
+## Third-Party Notices
+
+This project incorporates concepts and design patterns from:
+
+- **RecallLoom** (https://github.com/Frappucc1no/RecallLoom)
+  Flat-file memory system for AI Agents. The inspiration and precursor to Synapse.
+
+- **Microsoft GraphRAG** (https://github.com/microsoft/graphrag)
+  Enterprise-scale graph-based retrieval-augmented generation. The academic
+  foundation for graph-topology memory management.
+
+No third-party source code is bundled in this distribution.
+All external inspirations are cited as design references only.
