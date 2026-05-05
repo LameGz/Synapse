@@ -2,9 +2,91 @@
 
 All notable changes to Synapse Graph Memory System.
 
-## [0.3.0] — 2026-05-04
+## [0.3.0] — 2026-05-05
 
-> 投稿前工程补全：Filtered BFS 索引层落地、读取侧运行时强制、跨平台兼容、设置自动合并、标签解析修复。
+> 投稿前工程补全 + Code Review 全量修复（16 issues）。Filtered BFS 索引层落地、读取侧运行时强制、跨平台兼容、设置自动合并、标签解析修复、文档补全、示例新增。
+
+---
+
+### 🔴 Critical Fixes（Code Review）
+
+#### C1. init.sh 漏拷 pre-read-check.sh
+**问题**：`init.sh` 的 hook 拷贝循环缺少 `pre-read-check.sh`，新用户安装后该 hook 完全缺失。
+**解决**：将 `pre-read-check.sh` 加入拷贝列表。
+**改动文件**：`scripts/init.sh`, `.claude/skills/synapse-graph-memory/scripts/init.sh`
+
+#### C2. settings.template.json 嵌套 schema 错误
+**问题**：`settings.template.json` 使用扁平 `{matcher, command}` 格式，与 Claude Code 实际要求的 `{matcher, hooks: [{type, command}]}` 不兼容，导致新用户安装后 hooks 静默失效。
+**解决**：重写模板，所有 4 个 hook 均采用标准嵌套格式。
+**改动文件**：`.claude/skills/synapse-graph-memory/settings.template.json`
+
+#### C3. pre-modify-check.sh blocks 数据源错误
+**问题**：脚本从前置元数据读取 `blocks` 字段，但 `blocks` 是自动计算字段，只存在于 `MEMORY_MAP.json` 中，导致影响面提示的下游消费者列表永远为空。
+**解决**：新增 `lookup_blocks()` Python 辅助函数，从 `MEMORY_MAP.json` 按需查询；用 `MAP_JSON` 变量替代 frontmatter 解析。
+**改动文件**：`scripts/hooks/pre-modify-check.sh` (×2)
+
+#### C4. README logo 图片路径错误
+**问题**：`README.md` 和 `README.zh-CN.md` 引用 `docs/images/synapse-logo.png`，实际文件名为 `Synapse.png`。
+**解决**：修正路径；同时移除中文 README 里一个破碎的占位符行；将 `[Flowchart placeholder]` 替换为真实 `<img>` 引用 `synapse-architecture.png`。
+**改动文件**：`README.md`, `README.zh-CN.md`
+
+---
+
+### 🟡 Important Fixes（Code Review）
+
+#### I5. README / USAGE 未提及 0.3.0 新功能
+**解决**：在 `README.md`、`README.zh-CN.md`、`USAGE.md` 中新增 Filtered BFS、aliases、Progress Summary、pre-read-check.sh、pre-modify-check.sh、init.sh wizard 的功能说明；更新 Hooks 表格（从 2 个扩展到 4 个）；更新 File Structure；Quick Start 新增 `init.sh` 一键向导作为首选方式。
+
+#### I6. IMPROVEMENTS.md 状态不一致
+**问题**：PreToolUse 协议守卫标记为 `⏳ 暂缓`，但实际上 v0.3.0 已落地为 `pre-read-check.sh`。
+**解决**：将该行状态改为 `✅ 已完成`，补充具体实现描述；在 BFS 协议守卫小节新增 `**状态**：✅ 已完成` 段落。
+
+#### I7. generate_memory_map.sh `set +eu` 范围过大
+**问题**：`set +eu` 禁用 exit-on-error 和 unset-variable 检查，跨度 430 行，会吞掉真实错误。
+**解决**：缩窄为 `set +u`（仅禁用 unset-variable），保留 `set -e` 以捕获真实命令失败。
+**改动文件**：`scripts/generate_memory_map.sh` (×2)
+
+#### I8. pre-read-check.sh 只读 stdin 第一行
+**问题**：`read -r input_line <&0` 只读第一行，多行 JSON 输入会截断。
+**解决**：改用 `input_line=$(cat <&0 || true)` 读取完整 stdin。
+**改动文件**：`scripts/hooks/pre-read-check.sh` (×2)
+
+#### I9. session-end.sh 字符串拼接脆弱
+**问题**：`all_touched` 使用 `$'\n'` 拼接，BSD/macOS 兼容性和可读性均差。
+**解决**：用 `printf '%s\n%s'` 条件分支重构拼接逻辑。
+**改动文件**：`scripts/hooks/session-end.sh` (×2)
+
+#### I10. 缺少 examples/ 示例
+**解决**：新增 `examples/` 目录，含 4 个节点（`mod_project`、`mod_auth-api`、`mod_payment`、`feat_checkout`）+ `MEMORY_MAP.md` + `README.md`，展示模块/特征区分、`depends_on`、aliases、Connection Points、Observation Format Change Log。
+
+---
+
+### 🟢 Minor Fixes（Code Review）
+
+#### M11. pre-read-check.sh 死分支
+**问题**：`case` 语句匹配 `meta/MEMORY_MAP.md|MEMORY_MAP.md`，但 `MEMORY_MAP.md` 不在 `meta/` 下，前半分支永不可达。
+**解决**：删除 `meta/MEMORY_MAP.md|`。
+**改动文件**：`scripts/hooks/pre-read-check.sh` (×2)
+
+#### M12. README 架构图占位符未替换
+**问题**：英文 README 有 `[Flowchart placeholder]`，中文 README 有破碎的 ``> [ `docs/images/Synapse.png`]``。
+**解决**：替换为真实 `<img src="docs/images/synapse-architecture.png">`。
+
+#### M13. generate_memory_map.sh awk 冗余回退
+**问题**：`issue_cnt=$(awk ... || echo 0)` 中 `|| echo 0` 冗余，因为 `END {print c+0}` 已保证输出。
+**解决**：删除 `|| echo 0`。
+**改动文件**：`scripts/generate_memory_map.sh` (×2)
+
+#### M14. init.sh PROJECT_ROOT 错位防护
+**问题**：从 `.claude/skills/` 子目录运行 `init.sh` 时，`SCRIPT_DIR/..` 会指向 skill 目录而非项目根。
+**解决**：检测路径含 `/.claude/skills/` 时自动向上回溯 3 层到项目根。
+**改动文件**：`scripts/init.sh` (×2)
+
+#### M15. USAGE.md 未解释 jq 用途
+**解决**：Prerequisites 段落补充 `jq` 用途；parse-session.sh 示例区新增 `--audit` 说明及何时需要 `jq` 的显式注释。
+
+#### M16. .gitignore 遗漏
+**解决**：追加 `MEMORY_MAP.json`（自动生成，不应提交）和 `.claude/.synapse_cache/`（会话运行时状态）。
 
 ---
 
