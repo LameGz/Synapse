@@ -7,6 +7,7 @@
 ## Table of Contents
 
 - [Initial Setup](#initial-setup)
+- [Natural-Language Memory Workflow](#natural-language-memory-workflow)
 - [Creating Your First Nodes](#creating-your-first-nodes)
 - [Daily Workflow](#daily-workflow)
 - [Cross-Module Work](#cross-module-work)
@@ -38,7 +39,7 @@ bash .claude/skills/synapse-graph-memory/scripts/init.sh
 
 1. **Auto-detect your tech stack** — reads `package.json`, `go.mod`, `pyproject.toml`, `Cargo.toml`, etc. to identify framework (Next.js, FastAPI, Express, etc.) and database.
 2. **Infer module boundaries** — detects common directories like `src/api`, `src/auth`, `src/db`, and generates `mod_*.md` skeletons for each.
-3. **Install all 4 hooks** — copies `pre-read-check.sh`, `pre-modify-check.sh`, `post-tool-use.sh`, and `session-end.sh` into `scripts/hooks/`.
+3. **Install hooks and workflow scripts** — copies `pre-read-check.sh`, `pre-modify-check.sh`, `post-tool-use.sh`, `session-end.sh`, plus `ingest_memory.py`, `apply_memory_proposal.py`, `suggest_edges.sh`, and `doctor.sh`.
 4. **Register hooks** — merges the Synapse hook configuration into `.claude/settings.json` (safe merge, no overwrite of existing hooks).
 5. **Build the first `MEMORY_MAP.md`** — generates index + JSON mirror immediately.
 
@@ -114,6 +115,31 @@ You should see:
 ```
 MEMORY_MAP.md regenerated: 1 nodes, 2 tags, 0 topology warnings.
 ```
+
+---
+
+## Natural-Language Memory Workflow
+
+v0.4 lets the user write plain engineering notes while Synapse turns them into structured graph updates.
+
+```bash
+python scripts/ingest_memory.py \
+  --project . \
+  --text "登录页面已经接好了，调用 POST /api/v1/auth/login。成功后保存 access_token 和 refresh_token。"
+```
+
+Save the JSON output as `proposal.json`, review `target_node`, `node_update`, and `edge_candidates`, then apply it:
+
+```bash
+python scripts/apply_memory_proposal.py --project . --proposal proposal.json
+bash scripts/suggest_edges.sh --proposal proposal.json
+bash scripts/generate_memory_map.sh --full
+bash scripts/doctor.sh --project .
+```
+
+High-confidence machine edges go into `auto_linked`. The generated map exposes `effective_edges = depends_on + auto_linked`, so traversal can use the full graph while still showing which edges were explicit and which were machine-suggested.
+
+Example: `examples/solo-saas/` contains a small login feature linked to `mod_auth-api` and `mod_design-system` through `auto_linked`.
 
 ---
 

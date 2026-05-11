@@ -43,77 +43,222 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
   fi
 fi
 
-# ─── Step 2.5: Co-read dependency inference ──────────────────────────────
-# Scan node files modified together in this session. If a pair of nodes
-# has no depends_on edge but they reference each other's body content,
-# suggest them as candidate dependencies for user confirmation.
-if git rev-parse --git-dir >/dev/null 2>&1 && [ -d "$META_DIR" ]; then
-  # Collect all node files touched this session
+# ─── Step 2.5: Auto-Link Engine (v0.4) ──────────────────────────────────
+# Three-layer confidence scoring:
+#   Layer 1 (Co-occurrence): +1/session for nodes touched together,
+#                            7-day half-life decay
+#   Layer 2 (Reference):     +3 if node body mentions other node's id
+#   Layer 3 (Semantic):      +0.5 per shared keyword
+# Thresholds:
+#   >= 5.0: auto-link candidate
+#   3.0-5.0: suggestion
+#   < 3.0: silent (accumulate in db)
+
+CO_DB="${PROJECT_ROOT}/.claude/.synapse_cache/cooccurrence.db"
+mkdir -p "$(dirname "$CO_DB")"
+
+today=$(date +%Y-%m-%d)
+today_epoch=$(date +%s)
+
+# Helper: normalize pair key (sorted alphabetically)
+normalize_pair() {
+  local a="$1" b="$2"
+  if [[ "$a" < "$b" ]]; then echo "$a|||$b"; else echo "$b|||$a"; fi
+}
+
+# Helper: apply 7-day half-life decay
+apply_decay() {
+  local count="$1" last_date="$2"
+  local last_epoch days_diff periods
+  last_epoch=$(date -d "$last_date" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$last_date" +%s 2>/dev/null || echo "")
+  [ -z "$last_epoch" ] && echo "$count" && return
+  days_diff=$(( (today_epoch - last_epoch) / 86400 ))
+  periods=$(( days_diff / 7 ))
+  if [ "$periods" -gt 0 ]; then
+    awk -v c="$count" -v p="$periods" 'BEGIN {for(i=0;i<p;i++) c=c*0.5; print int(c)}'
+  else
+    echo "$count"
+  fi
+}
+
+# Helper: extract keywords from node body
+extract_node_keywords() {
+  local file="$1"
+  local body
+  body=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "$file" 2>/dev/null || true)
+  {
+    echo "$body" | grep -oE '(GET|POST|PUT|DELETE|PATCH)[[:space:]]+(/[a-zA-Z0-9_/{}:-]+)' | sed -E 's/^[A-Z]+[[:space:]]+//'
+    echo "$body" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*\(\)'
+    echo "$body" | sed -n 's/.*\*\*[Tt]able\*\*:[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\).*/\1/p'
+    echo "$body" | grep -oE '\b[A-Z][A-Z0-9_]{2,}\b' | grep -vE '^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$'
+  } | sort -u | tr '\n' ' ' | sed 's/^ *//;s/ *$//' || true
+}
+
+# Helper: semantic score (*10 integer, actual = /10)
+semantic_score() {
+  local kw1="$1" kw2="$2"
+  [ -z "$kw1" ] || [ -z "$kw2" ] && echo "0" && return
+  local shared
+  shared=$(comm -12 <(echo "$kw1" | tr ' ' '\n' | grep . | sort) <(echo "$kw2" | tr ' ' '\n' | grep . | sort) | wc -l)
+  echo "$(( shared * 5 ))"
+}
+
+if [ -d "$META_DIR" ]; then
+
+  # Collect node files touched this session
   all_touched=""
-  if [ -n "$modified" ] && [ -n "$untracked" ]; then
-    all_touched=$(printf '%s\n%s' "$modified" "$untracked")
-  elif [ -n "$modified" ]; then
-    all_touched="$modified"
-  elif [ -n "$untracked" ]; then
-    all_touched="$untracked"
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    if [ -n "${modified:-}" ] && [ -n "${untracked:-}" ]; then
+      all_touched=$(printf '%s\n%s' "$modified" "$untracked")
+    elif [ -n "${modified:-}" ]; then
+      all_touched="$modified"
+    elif [ -n "${untracked:-}" ]; then
+      all_touched="$untracked"
+    fi
   fi
 
+  # Filter to valid meta/*.md node files and deduplicate
+  declare -A TOUCHED_SET
   if [ -n "$all_touched" ]; then
-    candidates=""
-    # Convert to array, handling newlines
-    while IFS= read -r f1; do
-      [ -z "$f1" ] && continue
-      [ ! -f "${PROJECT_ROOT}/${f1}" ] && continue
-      id1=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${f1}" 2>/dev/null || true)
-      deps1=$(awk '/^---$/{c++;next} c==1 && /^depends_on:/{in_dep=1; next} in_dep==1 && /^[[:space:]]*-/{d=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",d); print d; next} in_dep==1 && /^[a-zA-Z#]/{exit}' "${PROJECT_ROOT}/${f1}" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-      [ -z "$id1" ] && continue
-
-      while IFS= read -r f2; do
-        [ -z "$f2" ] && continue
-        [ "$f1" = "$f2" ] && continue
-        [ ! -f "${PROJECT_ROOT}/${f2}" ] && continue
-        id2=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${f2}" 2>/dev/null || true)
-        deps2=$(awk '/^---$/{c++;next} c==1 && /^depends_on:/{in_dep=1; next} in_dep==1 && /^[[:space:]]*-/{d=$0; sub(/^[[:space:]]*-[[:space:]]*/,"",d); print d; next} in_dep==1 && /^[a-zA-Z#]/{exit}' "${PROJECT_ROOT}/${f2}" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-        [ -z "$id2" ] && continue
-
-        # Skip if edge already exists either way
-        if echo "$deps1," | grep -qF "${f2}," || echo "$deps2," | grep -qF "${f1},"; then
-          continue
-        fi
-
-        # Check mutual body references: does f1 mention id2, and f2 mention id1?
-        body1=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${f1}" 2>/dev/null || true)
-        body2=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${f2}" 2>/dev/null || true)
-
-        ref1=$(echo "$body1" | grep -ciF "$id2" 2>/dev/null || echo 0)
-        ref2=$(echo "$body2" | grep -ciF "$id1" 2>/dev/null || echo 0)
-
-        if [ "$ref1" -gt 0 ] && [ "$ref2" -gt 0 ]; then
-          pair_key=$(printf '%s|||%s' "$f1" "$f2")
-          if [[ "$f1" < "$f2" ]]; then pair_key="$f1|||$f2"; fi
-          # Avoid duplicates
-          if ! echo "$candidates" | grep -qF "$pair_key"; then
-            candidates="${candidates}${pair_key}
-"
-          fi
-        fi
-      done <<< "$all_touched"
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      [[ "$f" == meta/*.md ]] || continue
+      [[ "$f" == *"MEMORY_MAP.md"* ]] && continue
+      [ -f "${PROJECT_ROOT}/${f}" ] || continue
+      TOUCHED_SET["$f"]=1
     done <<< "$all_touched"
+  fi
 
-    if [ -n "$candidates" ]; then
+  # ─── Load & decay existing co-occurrence db ──────────────────────────
+  declare -A CO_COUNT
+  declare -A CO_LAST_UPDATED
+
+  if [ -f "$CO_DB" ]; then
+    while IFS='|' read -r na nb count last_up; do
+      [ -z "$na" ] && continue
+      [ "$count" = "0" ] && continue
+      decayed=$(apply_decay "$count" "$last_up")
+      if [ "$decayed" -gt 0 ]; then
+        key="$na|||$nb"
+        CO_COUNT["$key"]="$decayed"
+        CO_LAST_UPDATED["$key"]="$last_up"
+      fi
+    done < "$CO_DB"
+  fi
+
+  # ─── Update co-occurrence counts for this session ────────────────────
+  touched_array=("${!TOUCHED_SET[@]}")
+  touched_len=${#touched_array[@]}
+
+  if [ "$touched_len" -gt 1 ]; then
+    for ((i=0; i<touched_len; i++)); do
+      f1="${touched_array[$i]}"
+      for ((j=i+1; j<touched_len; j++)); do
+        f2="${touched_array[$j]}"
+        key=$(normalize_pair "$f1" "$f2")
+        CO_COUNT["$key"]=$(( ${CO_COUNT[$key]:-0} + 1 ))
+        CO_LAST_UPDATED["$key"]="$today"
+      done
+    done
+  fi
+
+  # ─── Write updated co-occurrence db ──────────────────────────────────
+  {
+    for key in "${!CO_COUNT[@]}"; do
+      count="${CO_COUNT[$key]}"
+      [ "$count" = "0" ] && continue
+      last_up="${CO_LAST_UPDATED[$key]:-$today}"
+      na="${key%%|||*}"
+      nb="${key##*|||}"
+      echo "$na|$nb|$count|$last_up"
+    done
+  } | sort > "$CO_DB"
+
+  # ─── Compute confidence & generate suggestions ───────────────────────
+  if [ ${#CO_COUNT[@]} -gt 0 ]; then
+    auto_links=""
+    suggestions=""
+
+    for key in "${!CO_COUNT[@]}"; do
+      count="${CO_COUNT[$key]}"
+      [ "$count" -lt 1 ] && continue
+
+      na="${key%%|||*}"
+      nb="${key##*|||}"
+
+      id_a=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+      id_b=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+      [ -z "$id_a" ] || [ -z "$id_b" ] && continue
+
+      # Check if already linked (depends_on or auto_linked, either direction)
+      fm_a=$(awk '/^---$/{c++;next} c==1' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+      fm_b=$(awk '/^---$/{c++;next} c==1' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+
+      deps_a=$(echo "$fm_a" | sed -n 's/^depends_on:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+      deps_b=$(echo "$fm_b" | sed -n 's/^depends_on:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+      auto_a=$(echo "$fm_a" | sed -n 's/^auto_linked:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+      auto_b=$(echo "$fm_b" | sed -n 's/^auto_linked:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+
+      already_linked=0
+      if echo " $deps_a $auto_a " | grep -qF " $nb "; then already_linked=1; fi
+      if echo " $deps_b $auto_b " | grep -qF " $na "; then already_linked=1; fi
+      [ "$already_linked" -eq 1 ] && continue
+
+      # Layer 1: Co-occurrence score (*10)
+      co_score=$(( count * 10 ))
+
+      # Layer 2: Reference signal
+      body_a=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+      body_b=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+
+      ref_a=$(echo "$body_a" | grep -ciF "$id_b" 2>/dev/null || echo 0)
+      ref_b=$(echo "$body_b" | grep -ciF "$id_a" 2>/dev/null || echo 0)
+      ref_score=$(( (ref_a + ref_b) * 30 ))
+
+      # Layer 3: Semantic signal
+      kw_a=$(extract_node_keywords "${PROJECT_ROOT}/${na}")
+      kw_b=$(extract_node_keywords "${PROJECT_ROOT}/${nb}")
+      sem_score=$(semantic_score "$kw_a" "$kw_b")
+
+      # Total confidence
+      total_score=$(( co_score + ref_score + sem_score ))
+      confidence="$(( total_score / 10 )).$(( total_score % 10 ))"
+
+      if [ "$total_score" -ge 50 ]; then
+        auto_links="${auto_links}$id_a ($na) ↔ $id_b ($nb)|$confidence|$count|$ref_a|$ref_b|$sem_score|$na|$nb
+"
+      elif [ "$total_score" -ge 30 ]; then
+        suggestions="${suggestions}$id_a ($na) ↔ $id_b ($nb)|$confidence|$count|$ref_a|$ref_b|$sem_score|$na|$nb
+"
+      fi
+    done
+
+    if [ -n "$auto_links" ]; then
       echo ""
-      echo "🔗 Suggested Dependencies (co-read pairs without edges)"
-      echo "──────────────────────────────────────────────────────"
-      while IFS= read -r pair; do
+      echo "🔗 Auto-Link Candidates (confidence >= 5.0)"
+      echo "────────────────────────────────────────────"
+      printf '%s' "$auto_links" | while IFS='|' read -r pair conf co ref_a ref_b sem na nb; do
         [ -z "$pair" ] && continue
-        f_a="${pair%%|||*}"
-        f_b="${pair##*|||}"
-        id_a=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${f_a}" 2>/dev/null || true)
-        id_b=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${f_b}" 2>/dev/null || true)
-        echo "  $id_a ($f_a) ↔ $id_b ($f_b)"
-        echo "    → Consider adding depends_on edge. Verify with: bash scripts/suggest_edges.sh"
-      done <<< "$candidates"
-      echo "──────────────────────────────────────────────────────"
+        echo "  $pair"
+        echo "    Confidence: $conf/10"
+        echo "    Signals: co-occurrence=$co, reference=$((ref_a+ref_b)), semantic=$((sem/10))"
+        echo "    → Add to frontmatter: auto_linked: [$nb]  # or [$na] in the other direction"
+      done
+      echo "────────────────────────────────────────────"
+    fi
+
+    if [ -n "$suggestions" ]; then
+      echo ""
+      echo "💡 Suggested Dependencies (confidence 3.0-5.0)"
+      echo "──────────────────────────────────────────────"
+      printf '%s' "$suggestions" | while IFS='|' read -r pair conf co ref_a ref_b sem na nb; do
+        [ -z "$pair" ] && continue
+        echo "  $pair"
+        echo "    Confidence: $conf/10"
+        echo "    Signals: co-occurrence=$co, reference=$((ref_a+ref_b)), semantic=$((sem/10))"
+        echo "    → Review with: bash scripts/suggest_edges.sh --auto"
+      done
+      echo "──────────────────────────────────────────────"
     fi
   fi
 fi

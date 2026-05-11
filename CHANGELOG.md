@@ -2,6 +2,83 @@
 
 All notable changes to Synapse Graph Memory System.
 
+## [0.4.0] — In Progress
+
+> 自动图构建（Auto-Link）+ 细粒度时序推理（Timeline）。补齐与学术方案的核心差距：从"手工维护 depends_on"到"三层置信度自动链接"，从"按月索引"到"契约级时间线"。
+
+---
+
+### 🔴 P0：自动图构建（Auto-Link）
+
+**问题**：手工维护 `depends_on` 的 O(N²) 复杂度不可持续。节点数 > 30 时，维护成本爆炸。
+
+**方案**：三层置信度自动链接（纯 bash + awk，零外部依赖）：
+
+| 信号层 | 来源 | 权重 | 示例 |
+|--------|------|------|------|
+| 共现信号 | 同一 session 被同时读取 | +1/次，7天衰减 | "改登录时 auth 和 login 总是一起读" |
+| 引用信号 | 节点 A 正文提到节点 B 的 id | +3/次 | "checkout 正文写了 `mod_payment`" |
+| 语义信号 | 共享关键词 Jaccard 相似度 | +0.5/词 | "两个节点都提到 JWT、Redis" |
+
+**阈值策略**：
+- ≥5 分：自动建立 `auto_linked` 边
+- 3-5 分：建议建立，需确认
+- <3 分：忽略
+
+**与 A-MEM 的差异**：A-MEM 用 LLM 做"智能黑盒链接"，我们用统计信号做"可解释白盒链接"——每条边都能查看证据。
+
+**改动文件**：
+- `scripts/hooks/session-end.sh`（升级 co-read 分析，增加置信度计算 + 持久化）
+- `scripts/suggest_edges.sh`（新增 `--auto` 模式）
+- `scripts/generate_memory_map.sh`（支持 `auto_linked` 字段）
+- `.claude/skills/synapse-graph-memory/template.md`（新增 `auto_linked` 文档）
+- `scripts/ingest_memory.py`（自然语言 → proposal）
+- `scripts/apply_memory_proposal.py`（安全应用 proposal）
+- `scripts/doctor.sh`（健康检查）
+- `examples/solo-saas/`（最小可运行示例）
+
+**实现细节**：
+- 新增 `.claude/.synapse_cache/cooccurrence.db` 持久化存储（格式：`node_a|node_b|count|last_updated`）
+- 共现衰减：7 天半衰期，用 `awk` 做浮点除法
+- 引用信号：扫描节点正文中的 id 互提及（双向检测）
+- 语义信号：提取 API 路径、函数名、表名、配置键，计算 Jaccard 交集
+- 置信度整数化：所有分数 ×10 运算，输出时除 10（避免 bash 浮点问题）
+- `generate_memory_map.sh` 同时修复了 `local` 在函数外使用的问题，以及 `set -e` + `pipefail` 导致 subshell 提前退出的问题
+
+**状态**：✅ 稳定版链路已完成（2026-05-11）
+
+**v0.4 稳定版补充**：
+- 用户输入自然语言工程记录，`ingest_memory.py` 抽取接口、字段、路由、组件和主题。
+- proposal 明确包含 `target_node`、`node_update`、`edge_candidates`、`confidence`、`evidence`。
+- `apply_memory_proposal.py` 创建/更新节点，去重 Current State，并把高置信边写入 `auto_linked`。
+- `suggest_edges.sh --proposal` 输出可解释候选边，避免黑盒图构建。
+- `MEMORY_MAP.md` / `MEMORY_MAP.json` 输出 `effective_edges = depends_on + auto_linked`。
+- `doctor.sh` 在上线/交付前检查死链和 frontmatter 基础完整性。
+
+---
+
+### 🟡 P1：细粒度时序推理（Timeline）
+
+**问题**：Change Log 只能回答"5月份改了什么"，无法回答"上周二下午登录接口变了什么"。
+
+**方案**：三层时序模型（轻量实现，不保留全量消息）：
+
+| 层级 | 粒度 | 示例 |
+|------|------|------|
+| L1 节点级 | 节点整体变更 | "mod_payment 在 2026-05-05 更新" |
+| L2 契约级 | API/字段/配置的变更 | "POST /payments 新增 currency 参数" |
+| L3 版本级 | 全局拓扑快照 | "2026-04-30 时支付模块依赖哪些节点" |
+
+**查询语法**：`time:2026-05-05`、`time:-7d`、`time:before:2026-05-01`
+
+**与 Zep 的差异**：Zep 保留"所有原始输入"（重），我们只保留"契约变更差异"（轻）——对项目开发，你不需要知道"上周二下午谁在 Slack 说了什么"，你需要知道"上周二下午登录接口的参数变了什么"。
+
+**改动文件**：
+- `scripts/generate_memory_map.sh`（解析契约变更，写入 JSON）
+- `scripts/query_timeline.sh`（新增查询脚本）
+
+---
+
 ## [0.3.0] — 2026-05-05
 
 > 投稿前工程补全 + Code Review 全量修复（16 issues）。Filtered BFS 索引层落地、读取侧运行时强制、跨平台兼容、设置自动合并、标签解析修复、文档补全、示例新增。

@@ -14,6 +14,9 @@ status: in-progress
 updated: YYYY-MM-DD
 summary: "One-line description of what this module does. Read first before loading full node."
 depends_on: []
+# `auto_linked`: system-discovered edges via co-occurrence + reference + semantic
+# signals. Confidence >= 5.0. Auto-decays if not reinforced. Review periodically.
+auto_linked: []
 tags: []
 aliases: []
 # `aliases` are natural language synonyms the user might say: Chinese terms,
@@ -91,6 +94,7 @@ status: in-progress
 updated: YYYY-MM-DD
 summary: "One-line description of what this feature does. Read first before loading full node."
 depends_on: []
+auto_linked: []
 tags: []
 aliases: []
 # `aliases` are natural language synonyms the user might say: Chinese terms,
@@ -98,6 +102,8 @@ aliases: []
 # for fallback matching. Pure string contains — no embedding model needed.
 # Example: tags: [auth, jwt] → aliases: [authentication, 认证, 登录, signin]
 # `blocks` is auto-computed — do NOT set it in the node file.
+# `auto_linked` stores high-confidence machine-suggested edges. MEMORY_MAP exposes
+# effective_edges = depends_on + auto_linked for traversal.
 ---
 
 # [Feature Name]
@@ -156,9 +162,12 @@ status: archived
 updated: YYYY-MM-DD
 summary: "Why this was archived and what it did. For historical reference only."
 depends_on: []
+auto_linked: []
 tags: []
 aliases: []
 # `blocks` is auto-computed — do NOT set it in the node file.
+# `auto_linked` stores high-confidence machine-suggested edges. MEMORY_MAP exposes
+# effective_edges = depends_on + auto_linked for traversal.
 ---
 
 # [Archived Feature Name]

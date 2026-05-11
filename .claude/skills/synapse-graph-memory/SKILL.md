@@ -28,7 +28,9 @@ Three CS primitives mapped to LLM context management: inverted index (MEMORY_MAP
 | Create persistent module | `meta/mod_<name>.md` with type: module |
 | Create feature (active) | `meta/feat_<name>.md` with type: feature, status: in-progress |
 | Archive completed feature | Move to `meta/archive/`, set status: archived, rebuild index |
-| Declare dependency | Add path to `depends_on` in both nodes' frontmatter |
+| Declare explicit dependency | Add path to `depends_on` when the relationship is confirmed and should be human-owned |
+| Natural-language memory write | `python scripts/ingest_memory.py --project . --text "..."` → review proposal → `python scripts/apply_memory_proposal.py --project . --proposal proposal.json` |
+| Explain proposal edges | `bash scripts/suggest_edges.sh --proposal proposal.json` — prints confidence and evidence |
 | Suggest dependencies | `bash scripts/suggest_edges.sh` — auto-detect from Connection Points |
 | Multi-root task | Select top-k nodes from MAP; ≤3 all, 4-5 by recency, >5 ask user |
 | Traverse context | Layer 1 MAP summary → Layer 2 target node → Layer 3 bounded BFS deps |
@@ -209,7 +211,7 @@ STEP 6 — Post-Retrieval
 ├─ Merge subgraphs if multiple roots.
 ├─ DO NOT load files outside assembled subgraph.
 ├─ Execute task.
-├─ If cross-module relationships changed: update `depends_on` on ALL affected nodes.
+├─ If cross-module relationships changed: update `depends_on` for confirmed human-owned edges or use `auto_linked` for high-confidence machine-suggested edges.
 └─ If node structure changed: run `scripts/generate_memory_map.sh`.
 
 STEP 7 — Session Wrap (HOOK-ENFORCED, do NOT execute manually)
@@ -257,7 +259,8 @@ updated: 2026-04-30
 summary: "One-line description for MAP triage. Read before loading full node."
 depends_on:
   - meta/mod_auth-api.md
-  - meta/mod_user-table.md
+auto_linked:
+  - meta/mod_design-system.md
 tags: [auth, login, jwt]
 aliases: [authentication, 认证, 登录, signin, token验证]
 # `aliases` are natural language synonyms the user might say (Chinese,
@@ -351,10 +354,15 @@ Rationale: Agent instruction compliance degrades in long sessions. Deterministic
 
 ### 3. Edge maintenance
 
-**depends_on (Agent managed):**
-- `feat_X depends_on mod_Y` means X needs Y's information to function.
-- After any work that touches cross-module boundaries, update `depends_on` on ALL affected nodes.
-- Check bidirectionality: if A depends_on B and B also needs to be aware of A, add the reverse edge too.
+**depends_on (confirmed explicit edges):**
+- `feat_X depends_on mod_Y` means X needs Y's information to function and the relationship has been confirmed by the Agent/user.
+- Users should not be forced to hand-write `depends_on` during normal memory capture. Prefer natural-language ingestion first, then promote only confirmed relationships.
+- After cross-module work, update `depends_on` only for stable, human-owned contracts.
+
+**auto_linked (machine-suggested edges):**
+- `auto_linked` stores high-confidence machine edges produced by natural-language ingestion or Auto-Link.
+- `MEMORY_MAP.md` and `MEMORY_MAP.json` expose `effective_edges = depends_on + auto_linked` for traversal while preserving the distinction between explicit and machine-suggested edges.
+- Use `bash scripts/suggest_edges.sh --proposal proposal.json` to inspect confidence and evidence before applying or promoting edges.
 
 **blocks (Script managed, MEMORY_MAP only — never lives in node files):**
 - `blocks` is the reverse of `depends_on`. If A depends_on B, then B is blocked_by A.
@@ -364,14 +372,15 @@ Rationale: Agent instruction compliance degrades in long sessions. Deterministic
 
 ### 4. Soft dependency inference (drift detection)
 
-Hard edges (`depends_on`) are the primary path. But they WILL drift — humans and Agents miss updates. The script auto-extracts keywords from each node (API endpoints, function names, tables, config keys) into `## Keyword Index` as a soft fallback when tag matching fails.
+Hard confirmed edges (`depends_on`) and machine-suggested edges (`auto_linked`) together form `effective_edges`. The script auto-extracts keywords from each node (API endpoints, function names, tables, config keys) into `## Keyword Index` as a soft fallback when tag matching fails.
 
 **Self-check after writing any node's `## Current State`:**
 1. Scan the text for references to other modules: API paths (`/api/v1/auth/*`), table names, component imports, config keys
-2. For each reference to another module's domain, verify `depends_on` contains that module
+2. For each reference to another module's domain, verify `effective_edges` contains that module
 3. If a reference exists but no edge declares it, EITHER:
-   - Add the edge to `depends_on`, OR
-   - Flag in `## Open Issues`: `[PENDING VERIFY: depends_on mod_X? Reference to /api/v1/X but no edge declared]`
+   - Add the edge to `auto_linked` when machine evidence is strong,
+   - Promote it to `depends_on` when the contract is confirmed and human-owned, OR
+   - Flag in `## Open Issues`: `[PENDING VERIFY: depends_on/auto_linked mod_X? Reference to /api/v1/X but no edge declared]`
 
 **This is NOT a replacement for hard edges.** It's a safety net. The script's keyword index provides semantic fallback; the topology health check catches dead links; this catches missing links.
 

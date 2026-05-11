@@ -41,7 +41,7 @@ if [ ! -f "$MAP_SCRIPT" ] && [ -f "${SKILL_SCRIPTS}/generate_memory_map.sh" ]; t
 fi
 
 # Copy auxiliary scripts (suggest_edges, etc.)
-for aux in suggest_edges.sh; do
+for aux in suggest_edges.sh ingest_memory.py apply_memory_proposal.py doctor.sh; do
   src="${SKILL_SCRIPTS}/${aux}"
   dst="${PROJECT_ROOT}/scripts/${aux}"
   if [ ! -f "$dst" ] && [ -f "$src" ]; then

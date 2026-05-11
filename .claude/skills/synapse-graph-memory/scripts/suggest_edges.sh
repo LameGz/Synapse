@@ -5,6 +5,8 @@
 # Modes:
 #   default (no args)     — Suggest NEW edges from content analysis
 #   --check-drift         — Validate EXISTING edges for staleness
+#   --auto                — Auto-Link: read co-occurrence db, score by
+#                           confidence (co-occurrence + reference + semantic)
 #
 # Agent's job shifts from "inventing edges" to "confirming/rejecting suggestions".
 set -euo pipefail
@@ -22,6 +24,8 @@ META_DIR="${PROJECT_ROOT}/meta"
 MODE="suggest"
 if [ "${1:-}" = "--check-drift" ]; then
   MODE="drift"
+elif [ "${1:-}" = "--auto" ]; then
+  MODE="auto"
 fi
 
 if [ ! -d "$META_DIR" ]; then
@@ -94,6 +98,173 @@ collect_node_metadata() {
     tags=$(extract_list_items "tags" "$fm" | tr '\n' ' ' | xargs)
     NODE_TAGS["$rel"]="$tags"
   done < <(find "$META_DIR" -maxdepth 2 -name '*.md' ! -name 'MEMORY_MAP.md' -print0 2>/dev/null || true)
+}
+
+# ─── Auto-Link helpers (shared with session-end.sh logic) ──────────────
+CO_DB="${PROJECT_ROOT}/.claude/.synapse_cache/cooccurrence.db"
+
+normalize_pair() {
+  local a="$1" b="$2"
+  if [[ "$a" < "$b" ]]; then echo "$a|||$b"; else echo "$b|||$a"; fi
+}
+
+apply_decay() {
+  local count="$1" last_date="$2"
+  local last_epoch days_diff periods
+  last_epoch=$(date -d "$last_date" +%s 2>/dev/null || date -j -f "%Y-%m-%d" "$last_date" +%s 2>/dev/null || echo "")
+  [ -z "$last_epoch" ] && echo "$count" && return
+  days_diff=$(( ( $(date +%s) - last_epoch) / 86400 ))
+  periods=$(( days_diff / 7 ))
+  if [ "$periods" -gt 0 ]; then
+    awk -v c="$count" -v p="$periods" 'BEGIN {for(i=0;i<p;i++) c=c*0.5; print int(c)}'
+  else
+    echo "$count"
+  fi
+}
+
+extract_node_keywords() {
+  local file="$1"
+  local body
+  body=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "$file" 2>/dev/null || true)
+  {
+    echo "$body" | grep -oE '(GET|POST|PUT|DELETE|PATCH)[[:space:]]+(/[a-zA-Z0-9_/{}:-]+)' | sed -E 's/^[A-Z]+[[:space:]]+//'
+    echo "$body" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*\(\)'
+    echo "$body" | sed -n 's/.*\*\*[Tt]able\*\*:[[:space:]]*\([a-zA-Z_][a-zA-Z0-9_]*\).*/\1/p'
+    echo "$body" | grep -oE '\b[A-Z][A-Z0-9_]{2,}\b' | grep -vE '^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$'
+  } | sort -u | tr '\n' ' ' | sed 's/^ *//;s/ *$//' || true
+}
+
+semantic_score() {
+  local kw1="$1" kw2="$2"
+  [ -z "$kw1" ] || [ -z "$kw2" ] && echo "0" && return
+  local shared
+  shared=$(comm -12 <(echo "$kw1" | tr ' ' '\n' | grep . | sort) <(echo "$kw2" | tr ' ' '\n' | grep . | sort) | wc -l)
+  echo "$(( shared * 5 ))"
+}
+
+# ─── Auto-Link mode: read co-occurrence db, compute confidence ─────────
+auto_suggest() {
+  if [ ! -f "$CO_DB" ]; then
+    echo "No co-occurrence data found. Run a few sessions first to build signals."
+    echo "Db expected at: $CO_DB"
+    exit 0
+  fi
+
+  echo "🤖 Synapse Auto-Link Suggestions"
+  echo "   (Three-layer confidence: co-occurrence + reference + semantic)"
+  echo ""
+
+  # Load and decay co-occurrence db
+  declare -A CO_COUNT
+  declare -A CO_LAST_UPDATED
+
+  while IFS='|' read -r na nb count last_up; do
+    [ -z "$na" ] && continue
+    [ "$count" = "0" ] && continue
+    decayed=$(apply_decay "$count" "$last_up")
+    if [ "$decayed" -gt 0 ]; then
+      key="$na|||$nb"
+      CO_COUNT["$key"]="$decayed"
+      CO_LAST_UPDATED["$key"]="$last_up"
+    fi
+  done < "$CO_DB"
+
+  if [ ${#CO_COUNT[@]} -eq 0 ]; then
+    echo "No co-occurrence pairs after decay."
+    exit 0
+  fi
+
+  # Compute confidence for all pairs
+  results=""
+
+  for key in "${!CO_COUNT[@]}"; do
+    count="${CO_COUNT[$key]}"
+    [ "$count" -lt 1 ] && continue
+
+    na="${key%%|||*}"
+    nb="${key##*|||}"
+
+    id_a=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+    id_b=$(awk '/^---$/{c++;next} c==1 && /^id:/{print $2; exit}' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+    [ -z "$id_a" ] || [ -z "$id_b" ] && continue
+
+    # Check if already linked
+    fm_a=$(awk '/^---$/{c++;next} c==1' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+    fm_b=$(awk '/^---$/{c++;next} c==1' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+
+    deps_a=$(echo "$fm_a" | sed -n 's/^depends_on:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+    deps_b=$(echo "$fm_b" | sed -n 's/^depends_on:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+    auto_a=$(echo "$fm_a" | sed -n 's/^auto_linked:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+    auto_b=$(echo "$fm_b" | sed -n 's/^auto_linked:[[:space:]]*//p' | tr -d '[]"' | tr ',' '\n' | xargs | tr '\n' ' ')
+
+    already_linked=0
+    if echo " $deps_a $auto_a " | grep -qF " $nb "; then already_linked=1; fi
+    if echo " $deps_b $auto_b " | grep -qF " $na "; then already_linked=1; fi
+    [ "$already_linked" -eq 1 ] && continue
+
+    co_score=$(( count * 10 ))
+
+    body_a=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${na}" 2>/dev/null || true)
+    body_b=$(awk 'BEGIN{fm=0} /^---$/{fm++; next} fm>=2' "${PROJECT_ROOT}/${nb}" 2>/dev/null || true)
+
+    ref_a=$(echo "$body_a" | grep -ciF "$id_b" 2>/dev/null || echo 0)
+    ref_b=$(echo "$body_b" | grep -ciF "$id_a" 2>/dev/null || echo 0)
+    ref_score=$(( (ref_a + ref_b) * 30 ))
+
+    kw_a=$(extract_node_keywords "${PROJECT_ROOT}/${na}")
+    kw_b=$(extract_node_keywords "${PROJECT_ROOT}/${nb}")
+    sem_score=$(semantic_score "$kw_a" "$kw_b")
+
+    total_score=$(( co_score + ref_score + sem_score ))
+    confidence="$(( total_score / 10 )).$(( total_score % 10 ))"
+
+    # Only include if >= 3.0 threshold
+    [ "$total_score" -lt 30 ] && continue
+
+    results="${results}${confidence}|${total_score}|${id_a}|${id_b}|${na}|${nb}|${count}|${ref_a}|${ref_b}|${sem_score}
+"
+  done
+
+  if [ -z "$results" ]; then
+    echo "No new suggestions above confidence threshold (3.0)."
+    echo ""
+    echo "Tip: Run more sessions, or manually add edges to build stronger signals."
+    exit 0
+  fi
+
+  # Sort by total_score descending
+  echo "Ranked by confidence (highest first):"
+  echo ""
+
+  printf '%s' "$results" | sort -t'|' -k2,2rn | while IFS='|' read -r conf total id_a id_b na nb count ref_a ref_b sem; do
+    [ -z "$conf" ] && continue
+    echo "💡 $id_b → $id_a"
+    echo "   Confidence: ${conf}/10"
+    echo "   Evidence:"
+    echo "     • Co-occurrence: ${count} session(s) together"
+    echo "     • Reference: ${id_a} mentioned ${ref_b} time(s) in ${id_b}, ${id_b} mentioned ${ref_a} time(s) in ${id_a}"
+    echo "     • Semantic: ${sem} shared keyword(s)"
+    echo ""
+    echo "   Action:"
+    if [ "$total" -ge 50 ]; then
+      echo "     [AUTO] Confidence >= 5.0 — add to auto_linked:"
+      echo "       auto_linked: [${na}]"
+      echo "       # or in ${na}: auto_linked: [${nb}]"
+    else
+      echo "     [SUGGEST] Confidence 3.0-5.0 — review manually:"
+      echo "       If valid: add to depends_on or auto_linked"
+      echo "       If invalid: ignore (will decay away if not reinforced)"
+    fi
+    echo ""
+  done
+
+  echo "────────────────────────────────────────────────────────────"
+  total_pairs=$(printf '%s' "$results" | grep -c '^')
+  auto_count=$(printf '%s' "$results" | awk -F'|' '$2 >= 50' | wc -l)
+  suggest_count=$(( total_pairs - auto_count ))
+  echo "Total: ${total_pairs} candidate pair(s)"
+  echo "  Auto-link eligible (>= 5.0): ${auto_count}"
+  echo "  Suggested (3.0-5.0): ${suggest_count}"
 }
 
 # ─── Suggest mode: propose new edges from content cross-references ─────
@@ -264,6 +435,8 @@ collect_node_metadata
 
 if [ "$MODE" = "drift" ]; then
   check_drift
+elif [ "$MODE" = "auto" ]; then
+  auto_suggest
 else
   suggest_edges
 fi

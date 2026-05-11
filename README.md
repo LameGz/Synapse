@@ -98,6 +98,16 @@ Synapse solves this by organizing memory as a graph. The Agent loads only the ta
 
 ---
 
+## What's New in 0.4.0
+
+| Feature | What it gives you |
+|---|---|
+| **Natural-language memory ingestion** | `scripts/ingest_memory.py` turns a plain engineering note into a structured proposal: target node, extracted endpoints/fields/components, node updates, and edge candidates. |
+| **Safe proposal applier** | `scripts/apply_memory_proposal.py` creates or updates Markdown nodes, deduplicates state bullets, writes change-log entries, and applies high-confidence machine edges to `auto_linked`. |
+| **Explainable proposal edges** | `scripts/suggest_edges.sh --proposal proposal.json` prints candidate edges with confidence and evidence such as exact endpoint matches. |
+| **Effective graph edges** | `MEMORY_MAP.md` and `MEMORY_MAP.json` now expose `effective_edges = depends_on + auto_linked`, preserving the difference between explicit and machine-suggested edges. |
+| **Doctor health check** | `scripts/doctor.sh --project .` validates frontmatter plus dead `depends_on` / `auto_linked` links before handoff or release. |
+
 ## What's New in 0.3.0
 
 | Feature | What it gives you |
@@ -121,7 +131,18 @@ Synapse solves this by organizing memory as a graph. The Agent loads only the ta
 bash .claude/skills/synapse-graph-memory/scripts/init.sh
 ```
 
-`init.sh` auto-detects the tech stack (Node/Go/Python/Rust/Java) and database, infers module boundaries from your directory layout (`src/api`, `src/auth`, `src/db`, …), generates `mod_project.md` plus per-module skeletons, copies all four hook scripts into `scripts/hooks/`, registers them in `.claude/settings.json`, and builds the first `MEMORY_MAP.md`. Re-runnable: existing nodes are skipped, never overwritten.
+`init.sh` auto-detects the tech stack (Node/Go/Python/Rust/Java) and database, infers module boundaries from your directory layout (`src/api`, `src/auth`, `src/db`, …), generates `mod_project.md` plus per-module skeletons, copies hook and v0.4 workflow scripts (`ingest_memory.py`, `apply_memory_proposal.py`, `suggest_edges.sh`, `doctor.sh`), registers them in `.claude/settings.json`, and builds the first `MEMORY_MAP.md`. Re-runnable: existing nodes are skipped, never overwritten.
+
+### Natural-language workflow
+
+```bash
+python scripts/ingest_memory.py --project . --text "登录页面已经接好了，调用 POST /api/v1/auth/login。成功后保存 access_token 和 refresh_token。"
+python scripts/apply_memory_proposal.py --project . --proposal proposal.json
+bash scripts/suggest_edges.sh --proposal proposal.json
+bash scripts/doctor.sh --project .
+```
+
+See `examples/solo-saas/` for a compact frontend + auth API + design-system graph using `auto_linked` edges.
 
 ### Option B — Manual setup
 
@@ -200,7 +221,10 @@ project/
 │   └── archive/               ← Archived features
 ├── scripts/
 │   ├── generate_memory_map.sh ← Index generator + topology validator + JSON mirror
-│   ├── suggest_edges.sh       ← Auto-detects dependency edges from Connection Points
+│   ├── ingest_memory.py       ← Natural-language note → structured proposal
+│   ├── apply_memory_proposal.py ← Safe proposal applier for node updates + auto_linked
+│   ├── suggest_edges.sh       ← Auto-detects dependency edges and explains proposal edges
+│   ├── doctor.sh              ← Health check for frontmatter and graph links
 │   ├── init.sh                ← One-command cold-start wizard
 │   ├── benchmark.sh           ← Token efficiency simulation (Synapse vs flat)
 │   └── hooks/
